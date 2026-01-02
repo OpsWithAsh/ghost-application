@@ -179,8 +179,7 @@ mkdir content
 sudo chown -R 1000:1000 ./content
 chmod -R 755 ./content
 
-**1️⃣ Install Prometheus
-Download & Extract**
+**Install Prometheus Download & Extract**
 
 cd /opt
 sudo curl -LO https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz
@@ -226,7 +225,7 @@ scrape_configs:
         replacement: localhost:9115
 
 
-Prometheus Systemd Service
+**Prometheus Systemd Service**
 sudo nano /etc/systemd/system/prometheus.service
 
 [Unit]
@@ -252,13 +251,13 @@ sudo systemctl start prometheus
 Access:
 http://publicip:9090
 
-2️⃣ Install Blackbox Exporter
+**Install Blackbox Exporter**
 cd /opt
 sudo curl -LO https://github.com/prometheus/blackbox_exporter/releases/download/v0.25.0/blackbox_exporter-0.25.0.linux-amd64.tar.gz
 sudo tar -xvf blackbox_exporter-0.25.0.linux-amd64.tar.gz
 sudo mv blackbox_exporter-0.25.0.linux-amd64 /usr/local/blackbox_exporter
 
-Blackbox Config
+**Blackbox Config**
 sudo nano /usr/local/blackbox_exporter/blackbox.yml
 
 modules:
@@ -291,7 +290,7 @@ sudo systemctl start blackbox_exporter
 ACCESS:
 http://publicip:9115
 
-3️⃣ Install Alertmanager
+**Install Alertmanager**
 
 cd /opt
 sudo curl -LO https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz
@@ -335,9 +334,9 @@ sudo systemctl start alertmanager
 
 Access:
 
-http://54.166.223.112:9093
+http://publicip:9093
 
-4️⃣ Install Grafana
+**Install Grafana**
 sudo apt update
 sudo apt install -y apt-transport-https software-properties-common
 wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
@@ -354,14 +353,14 @@ sudo systemctl start grafana-server
 
 Access:
 
-http://54.166.223.112:3000
+http://publicip:3000
 
 
 Default login:
 
 admin / admin
 
-5️⃣ Grafana Configuration
+**Grafana Configuration**
 Add Prometheus Data Source
 
 URL: http://localhost:9090
