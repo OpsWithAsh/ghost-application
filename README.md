@@ -114,15 +114,80 @@ Docker tag :previous
 Re-deploy previous image
 Zero downtime using Docker Compose
 
-1️⃣ Install Prometheus
-Download & Extract
+**Docker + Buildx**
+
+sudo apt-get update -y
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update -y
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
+
+**AWS CLI**
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version
+
+**SonarQube**
+mkdir -p ~/sonarqube/{data,extensions,logs}
+cat > ~/sonarqube/docker-compose.yml <<'YML'
+services:
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonarqube
+    ports:
+      - "9000:9000"
+    environment:
+      - SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true
+    volumes:
+      - ./data:/opt/sonarqube/data
+      - ./extensions:/opt/sonarqube/extensions
+      - ./logs:/opt/sonarqube/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/about"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+YML
+
+sudo chown -R 1000:1000 ~/sonarqube/data ~/sonarqube/extensions ~/sonarqube/logs
+docker compose -f ~/sonarqube/docker-compose.yml up -d
+
+**Self Hosted GitHub Runner**
+
+sudo useradd -m -s /bin/bash github
+sudo usermod -aG docker github         
+sudo su - github
+
+mkdir actions-runner && cd actions-runner
+curl -o actions-runner-linux-x64-2.328.0.tar.gz -L https://github.com/actions/runner/releases/download/v2.328.0/actions-runner-linux-x64-2.328.0.tar.gz
+echo "01066fad3a2893e63e6ca880ae3a1fad5bf9329d60e77ee15f2b97c148c3cd4e  actions-runner-linux-x64-2.328.0.tar.gz" | shasum -a 256 -c
+tar xzf ./actions-runner-linux-x64-2.328.0.tar.gz
+./config.sh --url https://github.com/<your-org>/<your-repo> --token <REPO_REGISTRATION_TOKEN>
+
+**Ghost App Setup on Servers**
+
+mkdir -p ~/ghost && cd ~/ghost
+mkdir content
+sudo chown -R 1000:1000 ./content
+chmod -R 755 ./content
+
+**1️⃣ Install Prometheus
+Download & Extract**
 
 cd /opt
 sudo curl -LO https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz
 sudo tar -xvf prometheus-2.54.1.linux-amd64.tar.gz
 sudo mv prometheus-2.54.1.linux-amd64 /usr/local/prometheus
 
-Prometheus Configuration
+**Prometheus Configuration**
 
 Create config file:
 
