@@ -1,0 +1,22 @@
+{
+  "url": "http://YOUR_PUBLIC_IP",
+  "server": {
+    "host": "0.0.0.0",
+    "port": 2368
+  },
+  "database": {
+    "client": "mysql",
+    "connection": {
+      "host": "ghost-mysql",
+      "user": "ghost",
+      "password": "ghostpass",
+      "database": "ghostdb"
+    }
+  },
+  "logging": {
+    "transports": ["stdout"]
+  },
+  "paths": {
+    "contentPath": "/var/lib/ghost/content"
+  }
+}

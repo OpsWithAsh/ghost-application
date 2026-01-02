@@ -1,0 +1,158 @@
+name: CI-CD
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: ghost-app
+  AWS_REGION: us-east-1
+  ECR_REPO: ghost-app
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+jobs:
+  prepare:
+    name: Prepare metadata
+    runs-on: [self-hosted, devops-runner]
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "image_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+  sonarqube:
+    name: SonarQube Analysis
+    needs: prepare
+    runs-on: [self-hosted, devops-runner]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@v2
+        with:
+          args: >
+            -Dsonar.projectKey=ghost-app
+            -Dsonar.sources=ghost,apps
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/coverage/**
+            -Dsonar.scanner.skipUnchanged=true
+            -Dsonar.scanner.skipUnchangedFiles=true
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+  build_push:
+    name: Build & Push Image
+    needs: [prepare, sonarqube]
+    runs-on: [self-hosted, devops-runner]
+    env:
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Set REPO_URI
+        run: echo "REPO_URI=${{ steps.login-ecr.outputs.registry }}/${ECR_REPO}" >> $GITHUB_ENV
+      - name: Sanity check
+        run: |
+          echo "IMAGE_TAG=${IMAGE_TAG}"
+          test -n "${IMAGE_TAG}" || { echo "IMAGE_TAG is empty"; exit 1; }
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Carry forward :previous
+        run: |
+          docker pull "${REPO_URI}:latest" || true
+          docker tag  "${REPO_URI}:latest" "${REPO_URI}:previous" || true
+          docker push "${REPO_URI}:previous" || true
+      - name: Build and Push with Cache
+        run: |
+          docker buildx create --name ci-builder --use --driver docker-container || true
+          docker buildx inspect --bootstrap
+          docker buildx build \
+            --file .docker/Dockerfile \
+            --cache-from=type=registry,ref=${REPO_URI}:buildcache \
+            --cache-to=type=registry,ref=${REPO_URI}:buildcache,mode=max \
+            -t ${REPO_URI}:latest \
+            -t ${REPO_URI}:${IMAGE_TAG} \
+            --push \
+            .
+
+  deploy_staging:
+    name: Deploy to Staging
+    needs: build_push
+    runs-on: [self-hosted, devops-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH into staging & deploy
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          echo "${STAGING_SSH_KEY}" | tr -d '\r' > key_staging.pem
+          chmod 600 key_staging.pem
+          scp -i key_staging.pem -o StrictHostKeyChecking=no deploy/docker-compose.staging.yml ${STAGING_SSH_USER}@${STAGING_HOST}:~/ghost/docker-compose.staging.yml
+          ssh -o StrictHostKeyChecking=no -i key_staging.pem ${STAGING_SSH_USER}@${STAGING_HOST} <<'EOS'
+          set -euo pipefail
+          REGION="us-east-1"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          cd ~/ghost
+          docker compose -f docker-compose.staging.yml pull
+          docker compose -f docker-compose.staging.yml up -d
+          docker image prune -f
+          EOS
+
+  smoke_test_staging:
+    name: Smoke Test Staging
+    needs: deploy_staging
+    runs-on: [self-hosted, devops-runner]
+    steps:
+      - name: Check staging URL
+        run: |
+          for i in {1..30}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.STAGING_HEALTH_URL }}" || true)
+            echo "Attempt $i => HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+
+  deploy_production:
+    name: Deploy to Production
+    needs: smoke_test_staging
+    runs-on: [self-hosted, devops-runner]
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH into production & deploy
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          echo "${PROD_SSH_KEY}" | tr -d '\r' > key_prod.pem
+          chmod 600 key_prod.pem
+          scp -i key_prod.pem -o StrictHostKeyChecking=no deploy/docker-compose.production.yml ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.production.yml
+          ssh -o StrictHostKeyChecking=no -i key_prod.pem ${PROD_SSH_USER}@${PROD_HOST} <<'EOS'
+          set -euo pipefail
+          REGION="us-east-1"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          cd ~/ghost
+          docker compose -f docker-compose.production.yml pull
+          docker compose -f docker-compose.production.yml up -d
+          docker image prune -f
+          EOS

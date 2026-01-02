@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  ghost-mysql:
+    image: mysql:8
+    container_name: ghost-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: ghostdb
+      MYSQL_USER: ghost
+      MYSQL_PASSWORD: ghostpass
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-prootpass"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ghost-app:
+    image: 481665112009.dkr.ecr.us-east-1.amazonaws.com/ghost-app:latest
+    container_name: ghost-staging
+    restart: unless-stopped
+    depends_on:
+      ghost-mysql:
+        condition: service_healthy
+    ports:
+      - "80:2368"
+    volumes:
+      - ./config.production.json:/var/lib/ghost/config.production.json:ro
+      - ./content:/var/lib/ghost/content
+    user: "1000:1000"   # run as node user
+
+volumes:
+  mysql_data:
+  content:
