@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: ghost
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8
+          env:
+            - name: MYSQL_DATABASE
+              value: ghostdb
+            - name: MYSQL_USER
+              value: ghost
+            - name: MYSQL_PASSWORD
+              value: ghostpass
+            - name: MYSQL_ROOT_PASSWORD
+              value: rootpass
+          ports:
+            - containerPort: 3306

@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghost-blue
+  namespace: ghost
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ghost
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: ghost
+        version: blue
+    spec:
+      containers:
+        - name: ghost
+          image: 481665112009.dkr.ecr.us-east-1.amazonaws.com/ghost-app:latest
+          ports:
+            - containerPort: 2368
+          envFrom:
+            - configMapRef:
+                name: ghost-config
