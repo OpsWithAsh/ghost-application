@@ -1,0 +1,52 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Where to rollback (staging or production)"
+        required: true
+        default: "staging"
+
+jobs:
+  rollback:
+    runs-on: [self-hosted, devops-runner]
+
+    steps:
+      - name: Select target environment
+        run: |
+          if [ "${{ github.event.inputs.environment }}" = "staging" ]; then
+            echo "HOST=${{ secrets.STAGING_HOST }}" >> $GITHUB_ENV
+            echo "SSH_USER=${{ secrets.STAGING_SSH_USER }}" >> $GITHUB_ENV
+            echo "COMPOSE_FILE=docker-compose.staging.yml" >> $GITHUB_ENV
+          else
+            echo "HOST=${{ secrets.PROD_HOST }}" >> $GITHUB_ENV
+            echo "SSH_USER=${{ secrets.PROD_SSH_USER }}" >> $GITHUB_ENV
+            echo "COMPOSE_FILE=docker-compose.production.yml" >> $GITHUB_ENV
+          fi
+
+      - name: Roll back to previous image
+        env:
+          SSH_KEY: ${{ github.event.inputs.environment == 'staging' && secrets.STAGING_SSH_KEY || secrets.PROD_SSH_KEY }}
+        run: |
+          echo "${SSH_KEY}" | tr -d '\r' > rollback_key.pem
+          chmod 600 rollback_key.pem
+
+          ssh -o StrictHostKeyChecking=no -i rollback_key.pem ${SSH_USER}@${HOST} <<EOF
+            set -e
+            REGION="us-east-1"
+            ACCOUNT_ID=\$(aws sts get-caller-identity --query 'Account' --output text)
+            REPO_URI="\${ACCOUNT_ID}.dkr.ecr.\${REGION}.amazonaws.com/ghost-app"
+
+            echo ">>> Pulling rollback image..."
+            docker pull \${REPO_URI}:previous
+
+            echo ">>> Retagging rollback image as latest..."
+            docker tag \${REPO_URI}:previous \${REPO_URI}:latest
+
+            cd ~/ghost
+            echo ">>> Restarting with rollback image..."
+            docker compose -f ${COMPOSE_FILE} up -d --force-recreate
+
+            echo ">>> Rollback complete!"
+          EOF

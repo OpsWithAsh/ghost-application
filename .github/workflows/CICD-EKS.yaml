@@ -1,0 +1,211 @@
+name: CI-CD
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: ghost-app
+  AWS_REGION: us-east-1
+  ECR_REPO: ghost-app
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+############################
+# 1️⃣ PREPARE METADATA
+############################
+  prepare:
+    name: Prepare metadata
+    runs-on: [self-hosted, devops-runner]
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          echo "image_tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+############################
+# 2️⃣ SONARQUBE
+############################
+  sonarqube:
+    name: SonarQube Analysis
+    needs: prepare
+    runs-on: [self-hosted, devops-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@v2
+        with:
+          args: >
+            -Dsonar.projectKey=ghost-app
+            -Dsonar.sources=ghost,apps
+            -Dsonar.exclusions=**/node_modules/**
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+############################
+# 3️⃣ BUILD & PUSH IMAGE (ECR)
+############################
+  build_push:
+    name: Build & Push Image (ECR)
+    needs: prepare
+    runs-on: [self-hosted, devops-runner]
+    env:
+      IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Image
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          IMAGE=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+
+          echo "Building image: $IMAGE"
+          echo "Using tag: ${IMAGE_TAG}"
+
+          docker buildx build \
+            --file .docker/Dockerfile \
+            -t ${IMAGE}:${IMAGE_TAG} \
+            -t ${IMAGE}:latest \
+            --push .
+
+############################
+# 4️⃣ DEPLOY TO STAGING
+############################
+  deploy_staging:
+    name: Deploy to Staging
+    needs: build_push
+    runs-on: [self-hosted, devops-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH & Deploy (Staging)
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+        run: |
+          echo "${STAGING_SSH_KEY}" > key.pem
+          chmod 600 key.pem
+          scp -i key.pem deploy/docker-compose.staging.yml ${STAGING_SSH_USER}@${STAGING_HOST}:~/ghost/docker-compose.yml
+          ssh -i key.pem ${STAGING_SSH_USER}@${STAGING_HOST} <<'EOF'
+            cd ~/ghost
+            docker compose pull
+            docker compose up -d
+          EOF
+
+############################
+# 5️⃣ SMOKE TEST STAGING
+############################
+  smoke_test_staging:
+    name: Smoke Test Staging
+    needs: deploy_staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Smoke Test Staging
+        run: |
+          URL="${{ secrets.STAGING_HEALTH_URL }}"
+          for i in {1..15}; do
+          code=$(curl -s --connect-timeout 2 --max-time 5 -o /dev/null -w "%{http_code}" "$URL" || true)
+          echo "Attempt $i => HTTP $code"
+          if [[ "$code" == "200" || "$code" == "301" || "$code" == "302" ]]; then
+          echo "✅ Smoke test passed"
+          exit 0
+          fi
+          sleep 1
+          done
+          echo "❌ Smoke test failed"
+          exit 1
+
+############################
+# 6️⃣ DEPLOY TO PRODUCTION
+############################
+  deploy_production:
+    name: Deploy to Production
+    needs: smoke_test_staging
+    runs-on: [self-hosted, devops-runner]
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: SSH into production & deploy
+        env:
+          PROD_HOST: ${{ secrets.PROD_HOST }}
+          PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+        run: |
+          echo "${PROD_SSH_KEY}" | tr -d '\r' > key_prod.pem
+          chmod 600 key_prod.pem
+          scp -i key_prod.pem -o StrictHostKeyChecking=no deploy/docker-compose.production.yml ${PROD_SSH_USER}@${PROD_HOST}:~/ghost/docker-compose.production.yml
+          ssh -o StrictHostKeyChecking=no -i key_prod.pem ${PROD_SSH_USER}@${PROD_HOST} <<'EOS'
+          set -euo pipefail
+          REGION="us-east-1"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
+          cd ~/ghost
+          docker compose -f docker-compose.production.yml pull
+          docker compose -f docker-compose.production.yml up -d
+          docker image prune -f
+          EOS
+
+
+############################
+# 7️⃣ DEPLOY TO EKS (BLUE)
+############################
+  deploy_eks_blue:
+    name: Deploy to EKS (Blue)
+    needs: build_push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: DEBUG – Workspace
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 5 -type f
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::481665112009:role/GitHubActions-EKS-Role
+          aws-region: us-east-1
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ghost-cluster --region us-east-1
+
+      - name: Verify cluster
+        run: kubectl get nodes
+
+      - name: Deploy MySQL
+        run: kubectl apply -f k8s/mysql.yaml
+
+      - name: Deploy Ghost Config
+        run: kubectl apply -f k8s/ghost-config.yaml
+
+      - name: Deploy Ghost Blue
+        run: kubectl apply -f k8s/ghost-blue.yaml
+
+      - name: Deploy Ghost Service
+        run: kubectl apply -f k8s/ghost-service.yaml
+
+      - name: Verify Pods & Service
+        run: |
+          kubectl get pods -n ghost
+          kubectl get svc -n ghost
